@@ -178,6 +178,8 @@ type Options struct {
 
 	Skills           []SkillRegistration
 	Subagents        []SubagentRegistration
+	// SkillsOnly restricts tool execution to only those defined in active skills' allowed-tools frontmatter.
+	SkillsOnly bool
 	Sandbox          SandboxOptions
 	AutoCompact      CompactConfig
 	OTEL             OTELConfig
