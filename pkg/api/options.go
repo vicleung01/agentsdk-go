@@ -168,6 +168,11 @@ type Options struct {
 	CustomTools            []tool.Tool
 	MCPServers             []string
 
+	// SkillsOnly restricts tool execution to only those defined in
+	// active skills' allowed-tools frontmatter. When no skill matches,
+	// only the "skill" tool is available (the model can only call skills).
+	SkillsOnly bool
+
 	TypedHooks             []hooks.ShellHook
 	HookMiddleware         []hooks.Middleware
 	HookTimeout            time.Duration
