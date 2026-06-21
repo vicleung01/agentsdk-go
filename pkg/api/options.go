@@ -154,6 +154,9 @@ type Options struct {
 	// only the "skill" tool is available (the model can only call skills).
 	SkillsOnly bool
 
+	// UseV2Runtime switches to the v2 runtime.
+	UseV2Runtime bool
+
 	// ReflectionEnabled enables the built-in structured reflection middleware.
 	// When nil, it defaults to enabled.
 	ReflectionEnabled *bool
