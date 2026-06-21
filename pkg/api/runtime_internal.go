@@ -81,6 +81,31 @@ func (rt *Runtime) prepare(ctx context.Context, req Request) (preparedRun, error
 	}
 	recorder := defaultHookRecorder()
 
+	// Auto-activate skill based on prompt keywords (ForceSkills routing).
+	if len(normalized.ForceSkills) == 0 {
+		pl := strings.ToLower(prompt)
+		switch {
+		case strings.Contains(pl, "10.107") || strings.Contains(pl, "mariadb") || strings.Contains(pl, "腾讯云"):
+			normalized.ForceSkills = []string{"cloud-mariadb-instances"}
+		case strings.Contains(pl, "10.108") || strings.Contains(pl, "tdsql") || strings.Contains(pl, "黑石") || strings.Contains(pl, "集群"):
+			normalized.ForceSkills = []string{"tdsql-ops-skill"}
+		case strings.Contains(pl, "tidb") || strings.Contains(pl, "172.21"):
+			normalized.ForceSkills = []string{"tidb-cluster-inspection"}
+		case strings.Contains(pl, "慢查询") || strings.Contains(pl, "slow"):
+			normalized.ForceSkills = []string{"cloud-slow-query"}
+		case strings.Contains(pl, "cpu") || strings.Contains(pl, "飙高"):
+			normalized.ForceSkills = []string{"dba-diagnose-cpu-spike"}
+		case strings.Contains(pl, "死锁") || strings.Contains(pl, "lock"):
+			normalized.ForceSkills = []string{"dba-diagnose-lock-wait"}
+		case strings.Contains(pl, "磁盘") || strings.Contains(pl, "空间") || strings.Contains(pl, "disk"):
+			normalized.ForceSkills = []string{"dba-diagnose-disk-full"}
+		case strings.Contains(pl, "连接") || strings.Contains(pl, "连不上"):
+			normalized.ForceSkills = []string{"cloud-mariadb-instances"}
+		case strings.Contains(pl, "dm") || strings.Contains(pl, "迁移"):
+			normalized.ForceSkills = []string{"dm-task-creation"}
+		}
+	}
+
 	activation := normalized.activationContext(prompt)
 
 	skillRes, promptAfterSkills, err := rt.executeSkills(ctx, prompt, activation, &normalized)
@@ -161,6 +186,13 @@ func (rt *Runtime) runAgentWithMiddleware(prep preparedRun, extras ...middleware
 	}
 	chain := middleware.NewChain(chainItems, middleware.WithTimeout(rt.opts.MiddlewareTimeout))
 
+	if rt.opts.UseV2Runtime {
+		resp, err := rt.runLoopV2(prep, selectedModel, hookAdapter, toolExec, chain, enableCache)
+		if err != nil {
+			return runResult{response: resp}, err
+		}
+		return runResult{response: resp}, nil
+	}
 	resp, err := rt.runLoop(prep, selectedModel, hookAdapter, toolExec, chain, enableCache)
 	if err != nil {
 		return runResult{response: resp}, err
@@ -588,4 +620,51 @@ func (rt *Runtime) newTrimmer() *message.Trimmer {
 		return nil
 	}
 	return message.NewTrimmer(rt.opts.TokenLimit, nil)
+}
+
+// fixSkillArgs auto-fills command param when AI calls skill() with null args.
+func fixSkillArgs(call *model.ToolCall, history *message.History) {
+	if call == nil || call.Name != "skill" {
+		return
+	}
+	if call.Arguments != nil && len(call.Arguments) > 0 {
+		return
+	}
+	if history == nil {
+		return
+	}
+	all := history.All()
+	var lastUserMsg string
+	for i := len(all) - 1; i >= 0; i-- {
+		if all[i].Role == "user" {
+			lastUserMsg = all[i].Content
+			break
+		}
+	}
+	if lastUserMsg == "" {
+		return
+	}
+	msg := strings.ToLower(lastUserMsg)
+	switch {
+	case strings.Contains(msg, "10.107") || strings.Contains(msg, "mariadb") || strings.Contains(msg, "慢查询"):
+		call.Arguments = map[string]interface{}{"command": "cloud-mariadb-instances"}
+	case strings.Contains(msg, "10.108") || strings.Contains(msg, "tdsql") || strings.Contains(msg, "集群") || strings.Contains(msg, "黑石"):
+		call.Arguments = map[string]interface{}{"command": "tdsql-ops-skill"}
+	case strings.Contains(msg, "tidb") || strings.Contains(msg, "172.21"):
+		call.Arguments = map[string]interface{}{"command": "tidb-cluster-inspection"}
+	case strings.Contains(msg, "cpu") || strings.Contains(msg, "飙高"):
+		call.Arguments = map[string]interface{}{"command": "dba-diagnose-cpu-spike"}
+	case strings.Contains(msg, "死锁") || strings.Contains(msg, "lock"):
+		call.Arguments = map[string]interface{}{"command": "dba-diagnose-lock-wait"}
+	case strings.Contains(msg, "磁盘") || strings.Contains(msg, "空间") || strings.Contains(msg, "disk"):
+		call.Arguments = map[string]interface{}{"command": "dba-diagnose-disk-full"}
+	case strings.Contains(msg, "延迟") || strings.Contains(msg, "同步") || strings.Contains(msg, "lag"):
+		call.Arguments = map[string]interface{}{"command": "dba-diagnose-replication-lag"}
+	case strings.Contains(msg, "连接") || strings.Contains(msg, "连不上") || strings.Contains(msg, "connect"):
+		call.Arguments = map[string]interface{}{"command": "cloud-mariadb-instances"}
+	case strings.Contains(msg, "dm") || strings.Contains(msg, "迁移"):
+		call.Arguments = map[string]interface{}{"command": "dm-task-creation"}
+	default:
+		call.Arguments = map[string]interface{}{"command": "cloud-mariadb-instances"}
+	}
 }

@@ -183,6 +183,8 @@ type Options struct {
 	Sandbox          SandboxOptions
 	AutoCompact      CompactConfig
 	OTEL             OTELConfig
+	// UseV2Runtime switches to the v2 runtime (Snip compression + circuit breaker + stream fallback + max_tokens recovery).
+	UseV2Runtime bool
 	fsLayer          *config.FS
 	settingsSnapshot *config.Settings
 	skReg            *skills.Registry
