@@ -80,32 +80,42 @@ func (rt *Runtime) prepare(ctx context.Context, req Request) (preparedRun, error
 	recorder := defaultHookRecorder()
 
 	activation := normalized.activationContext(prompt)
-		// ForceSkills — auto-activate skill based on prompt keywords (v2 runtime).
-		if len(normalized.ForceSkills) == 0 {
-			pl := strings.ToLower(prompt)
-			switch {
-			case strings.Contains(pl, "10.107") || strings.Contains(pl, "mariadb") || strings.Contains(pl, "腾讯云"):
-				normalized.ForceSkills = []string{"cloud-mariadb-instances"}
-			case strings.Contains(pl, "10.108") || strings.Contains(pl, "tdsql") || strings.Contains(pl, "黑石") || strings.Contains(pl, "集群"):
-				normalized.ForceSkills = []string{"tdsql-ops-skill"}
-			case strings.Contains(pl, "tidb") || strings.Contains(pl, "172.21"):
-				normalized.ForceSkills = []string{"tidb-cluster-inspection"}
-			case strings.Contains(pl, "慢查询") || strings.Contains(pl, "slow"):
-				normalized.ForceSkills = []string{"cloud-slow-query"}
-			case strings.Contains(pl, "cpu") || strings.Contains(pl, "飙高"):
-				normalized.ForceSkills = []string{"dba-diagnose-cpu-spike"}
-			case strings.Contains(pl, "死锁") || strings.Contains(pl, "lock"):
-				normalized.ForceSkills = []string{"dba-diagnose-lock-wait"}
-			case strings.Contains(pl, "磁盘") || strings.Contains(pl, "空间") || strings.Contains(pl, "disk"):
-				normalized.ForceSkills = []string{"dba-diagnose-disk-full"}
-			case strings.Contains(pl, "连接") || strings.Contains(pl, "连不上"):
-				normalized.ForceSkills = []string{"cloud-mariadb-instances"}
-			case strings.Contains(pl, "dm") || strings.Contains(pl, "迁移"):
-				normalized.ForceSkills = []string{"dm-task-creation"}
-			}
+
+<<<<<<< HEAD
+=======
+	skylarkProgressive := false
+	if rt.opts.Skylark != nil && rt.opts.Skylark.Enabled {
+		skylarkProgressive = true
+		if isSkylarkSimplePrompt(prompt, rt.opts.Skylark) {
+			skylarkProgressive = false
 		}
+	}
 
-
+	// Auto-activate skill based on prompt keywords.
+	if len(normalized.ForceSkills) == 0 {
+		pl := strings.ToLower(prompt)
+		switch {
+		case strings.Contains(pl, "10.107") || strings.Contains(pl, "mariadb") || strings.Contains(pl, "腾讯云"):
+			normalized.ForceSkills = []string{"cloud-mariadb-instances"}
+		case strings.Contains(pl, "10.108") || strings.Contains(pl, "tdsql") || strings.Contains(pl, "黑石") || strings.Contains(pl, "集群"):
+			normalized.ForceSkills = []string{"tdsql-ops-skill"}
+		case strings.Contains(pl, "tidb") || strings.Contains(pl, "172.21"):
+			normalized.ForceSkills = []string{"tidb-cluster-inspection"}
+		case strings.Contains(pl, "慢查询") || strings.Contains(pl, "slow"):
+			normalized.ForceSkills = []string{"cloud-slow-query"}
+		case strings.Contains(pl, "cpu") || strings.Contains(pl, "飙高"):
+			normalized.ForceSkills = []string{"dba-diagnose-cpu-spike"}
+		case strings.Contains(pl, "死锁") || strings.Contains(pl, "lock"):
+			normalized.ForceSkills = []string{"dba-diagnose-lock-wait"}
+		case strings.Contains(pl, "磁盘") || strings.Contains(pl, "空间") || strings.Contains(pl, "disk"):
+			normalized.ForceSkills = []string{"dba-diagnose-disk-full"}
+		case strings.Contains(pl, "连接") || strings.Contains(pl, "连不上"):
+			normalized.ForceSkills = []string{"cloud-mariadb-instances"}
+		case strings.Contains(pl, "dm") || strings.Contains(pl, "迁移"):
+			normalized.ForceSkills = []string{"dm-task-creation"}
+		}
+	}
+>>>>>>> 2e7c641... feat: v2 runtime 引擎 + ForceSkills 关键词路由
 	var skillRes []SkillExecution
 	var err error
 	var afterSkills string

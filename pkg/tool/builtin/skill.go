@@ -11,12 +11,10 @@ import (
 	"github.com/stellarlinkco/agentsdk-go/pkg/tool"
 )
 
-const skillToolDescriptionHeader = `Execute a skill.
+const skillToolDescriptionHeader = `Activate a skill to unlock its tools.
 
-<skills_instructions>
-Call this tool with {"command":"<skill-name>"} (no arguments).
-Only use skills listed in <available_skills>. Do not invoke a skill that is already running.
-</skills_instructions>
+After activating a skill, you can use the tools listed in <available_skills>.
+To activate, call this tool with command="skill-name".
 
 <available_skills>
 `
@@ -26,10 +24,9 @@ var skillSchema = &tool.JSONSchema{
 	Properties: map[string]interface{}{
 		"command": map[string]interface{}{
 			"type":        "string",
-			"description": "The skill name (no arguments). E.g., \"pdf\" or \"xlsx\"",
+			"description": "Skill to activate: cloud-mariadb-instances, tdsql-ops-skill, mysql-ops-skill, tidb-cluster-inspection, dba-diagnose-cpu-spike, dm-task-creation",
 		},
 	},
-	Required: []string{"command"},
 }
 
 // ActivationContextProvider resolves the activation context for manual skill calls.
@@ -115,7 +112,7 @@ func (s *SkillTool) Execute(ctx context.Context, params map[string]interface{}) 
 	}
 	name, err := parseSkillName(params)
 	if err != nil {
-		return nil, err
+		return &tool.ToolResult{Success: true, Output: "请指定技能名称，例如: cloud-mariadb-instances, tdsql-ops-skill"}, nil
 	}
 	act := s.provider(ctx)
 	result, err := s.registry.Execute(ctx, name, act)
@@ -137,21 +134,23 @@ func (s *SkillTool) Execute(ctx context.Context, params map[string]interface{}) 
 
 func parseSkillName(params map[string]interface{}) (string, error) {
 	if params == nil {
-		return "", errors.New("params is nil")
+		return "", errors.New("params nil - use {\"command\":\"skill-name\"}")
 	}
-	raw, ok := params["command"]
-	if !ok {
-		return "", errors.New("command is required")
+	// Try multiple parameter names that different models might use
+	for _, key := range []string{"command", "skill", "name"} {
+		raw, ok := params[key]
+		if !ok {
+			continue
+		}
+		name, err := coerceString(raw)
+		if err == nil {
+			name = strings.ToLower(strings.TrimSpace(name))
+			if name != "" {
+				return name, nil
+			}
+		}
 	}
-	name, err := coerceString(raw)
-	if err != nil {
-		return "", fmt.Errorf("command must be string: %w", err)
-	}
-	name = strings.ToLower(strings.TrimSpace(name))
-	if name == "" {
-		return "", errors.New("command cannot be empty")
-	}
-	return name, nil
+	return "", errors.New("command required - use {\"command\":\"skill-name\"}")
 }
 
 func formatSkillOutput(result skills.Result) string {
