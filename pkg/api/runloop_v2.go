@@ -42,9 +42,9 @@ const (
 type loopState struct {
 	iteration                   int
 	turnCount                   int
-	snipTriggered               int  // Number of times Snip compression was triggered
-	maxOutputTokensRecovery     int  // Number of max_tokens recoveries attempted
-	hasAttemptedReactiveCompact bool // Whether reactive compaction has been tried
+	snipTriggered               int            // Number of times Snip compression was triggered
+	maxOutputTokensRecovery     int            // Number of max_tokens recoveries attempted
+	hasAttemptedReactiveCompact bool           // Whether reactive compaction has been tried
 	lastTransition              loopTransition // Most recent state machine transition
 }
 
@@ -52,7 +52,7 @@ type loopState struct {
 // Thread-safe: all methods are protected by mutex.
 type compactCircuitBreaker struct {
 	mu               sync.Mutex
-	failureThreshold int           // Default: 3
+	failureThreshold int // Default: 3
 	failureCount     int
 	open             bool
 	cooldown         time.Duration // Default: 30s
@@ -100,7 +100,7 @@ func (cb *compactCircuitBreaker) isOpen() bool {
 // SnipConfig controls the Snip compression layer.
 type SnipConfig struct {
 	Enabled      bool    `json:"enabled"`
-	TriggerRatio float64 `json:"trigger_ratio"` // Default: 0.95
+	TriggerRatio float64 `json:"trigger_ratio"`  // Default: 0.95
 	MaxSnipCount int     `json:"max_snip_count"` // Default: 2
 }
 
@@ -177,11 +177,11 @@ func (rt *Runtime) runLoopV2(prep preparedRun, mdl model.Model, hookAdapter *run
 			return
 		}
 		tracer.EndSpan(agentSpan, map[string]any{
-			"session_id":             strings.TrimSpace(prep.normalized.SessionID),
-			"request_id":             strings.TrimSpace(prep.normalized.RequestID),
-			"iterations":             loopState.iteration,
-			"entry_point":            string(prep.normalized.Mode.EntryPoint),
-			"v2.snip_triggered":      loopState.snipTriggered,
+			"session_id":              strings.TrimSpace(prep.normalized.SessionID),
+			"request_id":              strings.TrimSpace(prep.normalized.RequestID),
+			"iterations":              loopState.iteration,
+			"entry_point":             string(prep.normalized.Mode.EntryPoint),
+			"v2.snip_triggered":       loopState.snipTriggered,
 			"v2.circuit_breaker_open": circuitBreaker.isOpen(),
 		}, runErr)
 	}()
@@ -305,98 +305,59 @@ func (rt *Runtime) runLoopV2(prep preparedRun, mdl model.Model, hookAdapter *run
 			return last, err
 		}
 
-		// --- Tool execution (inline, reuses v1 helpers) ---
+		// --- Tool execution (origin/main Execute; preserves concurrency + middleware + tracer) ---
 		if len(resp.Message.ToolCalls) > 0 {
 			calls := resp.Message.ToolCalls
 			var firstMiddlewareErr error
-			type prepSlot struct {
-				prep toolPreparation
-			}
-			preps := make([]prepSlot, len(calls))
-			for i := range calls {
+			outs := make([]*toolpkg.CallResult, len(calls))
+
+			runTool := func(i int) {
 				state.ToolCall = calls[i]
 				if err := chain.Execute(ctx, middleware.StageBeforeTool, state); err != nil && firstMiddlewareErr == nil {
 					firstMiddlewareErr = err
 				}
-				if tools == nil {
-					runErr = errors.New("api: tool executor is nil")
-					return last, runErr
-				}
-				preps[i].prep = tools.prepareToolCall(ctx, calls[i])
-			}
-
-			type invokeOut struct {
-				res     *toolpkg.CallResult
-				execErr error
-				content string
-			}
-			outs := make([]invokeOut, len(calls))
-
-			runInvoke := func(i int) {
-				p := preps[i].prep
-				call := p.Call
-				switch {
-				case p.Denied != nil, p.EmptyArgsResult != nil, p.PreHookErr != nil:
-					if p.EmptyArgsResult != nil {
-						outs[i].res = p.EmptyArgsResult
-						if p.EmptyArgsResult.Result != nil {
-							outs[i].content = p.EmptyArgsResult.Result.Output
-						}
-					}
-					if p.PreHookErr != nil {
-						outs[i].execErr = p.PreHookErr
-						outs[i].content = fmt.Sprintf(`{"error":%q}`, p.PreHookErr.Error())
-					}
-					return
-				default:
-				}
 				toolSpan := SpanContext(nil)
 				if tracer != nil {
-					toolSpan = tracer.StartToolSpan(agentSpan, strings.TrimSpace(call.Name))
+					toolSpan = tracer.StartToolSpan(agentSpan, strings.TrimSpace(calls[i].Name))
 				}
-				res, err, content := tools.invokeToolCall(ctx, call)
+				res, err := tools.Execute(ctx, calls[i])
 				if tracer != nil {
 					tracer.EndSpan(toolSpan, map[string]any{
 						"session_id":  strings.TrimSpace(prep.normalized.SessionID),
 						"request_id":  strings.TrimSpace(prep.normalized.RequestID),
-						"tool_use_id": strings.TrimSpace(call.ID),
-						"tool_name":   strings.TrimSpace(call.Name),
+						"tool_use_id": strings.TrimSpace(calls[i].ID),
+						"tool_name":   strings.TrimSpace(calls[i].Name),
 					}, err)
 				}
-				outs[i] = invokeOut{res: res, execErr: err, content: content}
+				outs[i] = res
 			}
 
-			parallel := !rt.opts.DisableParallelToolCalls && len(calls) > 1
+			parallel := len(calls) > 1
 			if parallel {
 				var wg sync.WaitGroup
 				for i := range calls {
 					wg.Add(1)
-					go func(i int) {
-						defer wg.Done()
-						runInvoke(i)
-					}(i)
+					go func(i int) { defer wg.Done(); runTool(i) }(i)
 				}
 				wg.Wait()
 			} else {
 				for i := range calls {
-					runInvoke(i)
+					runTool(i)
 				}
 			}
 
 			for i := range calls {
 				state.ToolCall = calls[i]
-				state.ToolResult = outs[i].res
+				state.ToolResult = outs[i]
 				if err := chain.Execute(ctx, middleware.StageAfterTool, state); err != nil && firstMiddlewareErr == nil {
 					firstMiddlewareErr = err
 				}
-				_ = tools.finalizeToolCall(ctx, preps[i].prep.Call, outs[i].res, outs[i].execErr, outs[i].content, preps[i].prep)
 			}
 			if firstMiddlewareErr != nil {
 				loopState.lastTransition = transitionError
 				runErr = firstMiddlewareErr
 				return last, firstMiddlewareErr
 			}
-
 			loopState.turnCount++
 			loopState.lastTransition = transitionContinue
 			continue
@@ -440,18 +401,6 @@ func formatTransition(t loopTransition) string {
 
 // isPromptTooLongError checks if the error indicates the prompt exceeded the model's
 // context window. Used by reactive compact to trigger aggressive Snip compression.
-func isPromptTooLongError(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "prompt is too long") ||
-		strings.Contains(msg, "prompt_too_long") ||
-		strings.Contains(msg, "context_length_exceeded") ||
-		strings.Contains(msg, "request too large") ||
-		strings.Contains(msg, "max context") ||
-		strings.Contains(msg, "token limit")
-}
 
 // defaultTokenLimitV2 returns the token limit from options or a sensible default.
 func defaultTokenLimitV2(rt *Runtime) int {
