@@ -1,0 +1,542 @@
+package api
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/stellarlinkco/agentsdk-go/pkg/config"
+	"github.com/stellarlinkco/agentsdk-go/pkg/message"
+	"github.com/stellarlinkco/agentsdk-go/pkg/model"
+	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/skills"
+	"github.com/stellarlinkco/agentsdk-go/pkg/runtime/subagents"
+	"github.com/stellarlinkco/agentsdk-go/pkg/sandbox"
+	"github.com/stellarlinkco/agentsdk-go/pkg/tool"
+	toolbuiltin "github.com/stellarlinkco/agentsdk-go/pkg/tool/builtin"
+)
+
+func availableTools(registry *tool.Registry, whitelist map[string]struct{}, schemaMode ToolPromptSchema) []model.ToolDefinition {
+	if registry == nil {
+		return nil
+	}
+	return availableToolsFromList(registry.List(), whitelist, schemaMode)
+}
+
+func availableToolsFromList(tools []tool.Tool, whitelist map[string]struct{}, schemaMode ToolPromptSchema) []model.ToolDefinition {
+	defs := make([]model.ToolDefinition, 0, len(tools))
+	for _, impl := range tools {
+		if impl == nil {
+			continue
+		}
+		name := strings.TrimSpace(impl.Name())
+		if name == "" {
+			continue
+		}
+		canon := canonicalToolName(name)
+		if len(whitelist) > 0 {
+			if _, ok := whitelist[canon]; !ok {
+				continue
+			}
+		}
+		params := toolParametersForPrompt(name, impl.Schema(), schemaMode)
+		defs = append(defs, model.ToolDefinition{
+			Name:        name,
+			Description: strings.TrimSpace(impl.Description()),
+			Parameters:  params,
+		})
+	}
+	sort.Slice(defs, func(i, j int) bool { return defs[i].Name < defs[j].Name })
+	return defs
+}
+
+func toolParametersForPrompt(name string, schema *tool.JSONSchema, schemaMode ToolPromptSchema) map[string]any {
+	if schemaMode != ToolPromptSchemaMinimal {
+		return schemaToMap(schema)
+	}
+	if canonicalToolName(name) == canonicalToolName(toolbuiltin.DescribeToolName) {
+		return schemaToMap(schema)
+	}
+	return nil
+}
+
+func availableToolsFromListAllowSet(tools []tool.Tool, allowed map[string]struct{}, schemaMode ToolPromptSchema) []model.ToolDefinition {
+	if len(allowed) == 0 {
+		return nil
+	}
+	defs := make([]model.ToolDefinition, 0, len(allowed))
+	for _, impl := range tools {
+		if impl == nil {
+			continue
+		}
+		name := strings.TrimSpace(impl.Name())
+		if name == "" {
+			continue
+		}
+		canon := canonicalToolName(name)
+		if _, ok := allowed[canon]; !ok {
+			continue
+		}
+		params := toolParametersForPrompt(name, impl.Schema(), schemaMode)
+		defs = append(defs, model.ToolDefinition{
+			Name:        name,
+			Description: strings.TrimSpace(impl.Description()),
+			Parameters:  params,
+		})
+	}
+	sort.Slice(defs, func(i, j int) bool { return defs[i].Name < defs[j].Name })
+	return defs
+}
+
+func augmentSystemPromptToolSchemaMinimal(systemPrompt string) string {
+	hint := "## Tool parameters\n\n" +
+		"Tool parameter JSON schemas are omitted from the API tool list to save tokens. " +
+		"Before calling a tool you have not used in this session, call `describe_tool` with `tool_name` or `tool_names` " +
+		"to fetch the exact parameter schema, then invoke the tool with valid arguments."
+	if strings.TrimSpace(systemPrompt) == "" {
+		return hint
+	}
+	return strings.TrimSpace(systemPrompt) + "\n\n" + hint
+}
+
+func schemaToMap(schema *tool.JSONSchema) map[string]any {
+	if schema == nil {
+		return nil
+	}
+	payload := map[string]any{}
+	if schema.Type != "" {
+		payload["type"] = schema.Type
+	}
+	if len(schema.Properties) > 0 {
+		payload["properties"] = schema.Properties
+	}
+	if len(schema.Required) > 0 {
+		payload["required"] = append([]string(nil), schema.Required...)
+	}
+	return payload
+}
+
+func convertMessages(msgs []message.Message) []model.Message {
+	if len(msgs) == 0 {
+		return nil
+	}
+	out := make([]model.Message, 0, len(msgs))
+	for _, msg := range msgs {
+		out = append(out, model.Message{
+			Role:             msg.Role,
+			Content:          msg.Content,
+			ContentBlocks:    convertContentBlocksToModel(msg.ContentBlocks),
+			ToolCalls:        convertToolCalls(msg.ToolCalls),
+			ReasoningContent: msg.ReasoningContent,
+		})
+	}
+	return out
+}
+
+func convertContentBlocksToModel(blocks []message.ContentBlock) []model.ContentBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := make([]model.ContentBlock, len(blocks))
+	for i, b := range blocks {
+		out[i] = model.ContentBlock{
+			Type:      model.ContentBlockType(b.Type),
+			Text:      b.Text,
+			MediaType: b.MediaType,
+			Data:      b.Data,
+			URL:       b.URL,
+		}
+	}
+	return out
+}
+
+func convertAPIContentBlocks(blocks []model.ContentBlock) []message.ContentBlock {
+	if len(blocks) == 0 {
+		return nil
+	}
+	out := make([]message.ContentBlock, len(blocks))
+	for i, b := range blocks {
+		out[i] = message.ContentBlock{
+			Type:      message.ContentBlockType(b.Type),
+			Text:      b.Text,
+			MediaType: b.MediaType,
+			Data:      b.Data,
+			URL:       b.URL,
+		}
+	}
+	return out
+}
+
+func convertToolCalls(calls []message.ToolCall) []model.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]model.ToolCall, len(calls))
+	for i, call := range calls {
+		out[i] = model.ToolCall{
+			ID:        call.ID,
+			Name:      call.Name,
+			Arguments: cloneArguments(call.Arguments),
+			Result:    call.Result,
+		}
+	}
+	return out
+}
+
+func cloneArguments(args map[string]any) map[string]any {
+	if len(args) == 0 {
+		return nil
+	}
+	dup := make(map[string]any, len(args))
+	for k, v := range args {
+		dup[k] = v
+	}
+	return dup
+}
+
+func registerSkills(registrations []SkillRegistration) (*skills.Registry, error) {
+	reg := skills.NewRegistry()
+	for _, entry := range registrations {
+		if entry.Handler == nil {
+			return nil, errors.New("api: skill handler is nil")
+		}
+		if err := reg.Register(entry.Definition, entry.Handler); err != nil {
+			return nil, err
+		}
+	}
+	return reg, nil
+}
+
+func registerSubagents(registrations []SubagentRegistration) (*subagents.Manager, error) {
+	if len(registrations) == 0 {
+		return nil, nil
+	}
+	mgr := subagents.NewManager()
+	for _, entry := range registrations {
+		if entry.Handler == nil {
+			return nil, errors.New("api: subagent handler is nil")
+		}
+		if err := mgr.Register(entry.Definition, entry.Handler); err != nil {
+			return nil, err
+		}
+	}
+	return mgr, nil
+}
+
+type loaderOptions struct {
+	ProjectRoot string
+	UserHome    string
+	EnableUser  bool
+	fs          *config.FS
+}
+
+func buildLoaderOptions(opts Options) loaderOptions {
+	return loaderOptions{
+		ProjectRoot: opts.ProjectRoot,
+		UserHome:    "",
+		EnableUser:  false,
+		fs:          opts.fsLayer,
+	}
+}
+
+func buildSkillsRegistry(opts Options) (*skills.Registry, []error) {
+	loader := buildLoaderOptions(opts)
+	fsRegs, errs := skills.LoadFromFS(skills.LoaderOptions{
+		ProjectRoot: loader.ProjectRoot,
+		UserHome:    loader.UserHome,
+		EnableUser:  loader.EnableUser,
+		FS:          loader.fs,
+	})
+
+	merged := mergeSkillRegistrations(fsRegs, opts.Skills, &errs)
+
+	reg := skills.NewRegistry()
+	for _, entry := range merged {
+		if err := reg.Register(entry.Definition, entry.Handler); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return reg, errs
+}
+
+func mergeSkillRegistrations(fsRegs []skills.SkillRegistration, manual []SkillRegistration, errs *[]error) []skills.SkillRegistration {
+	merged := make([]skills.SkillRegistration, 0, len(fsRegs)+len(manual))
+	index := map[string]int{}
+
+	add := func(def skills.Definition, handler skills.Handler, source string) {
+		key := strings.ToLower(strings.TrimSpace(def.Name))
+		if key == "" {
+			*errs = append(*errs, fmt.Errorf("api: skill name is empty (%s)", source))
+			return
+		}
+		if handler == nil {
+			*errs = append(*errs, fmt.Errorf("api: skill %s handler is nil", key))
+			return
+		}
+		reg := skills.SkillRegistration{Definition: def, Handler: handler}
+		if idx, ok := index[key]; ok {
+			merged[idx] = reg
+			return
+		}
+		index[key] = len(merged)
+		merged = append(merged, reg)
+	}
+
+	for _, reg := range fsRegs {
+		add(reg.Definition, reg.Handler, "loader")
+	}
+	for _, reg := range manual {
+		add(reg.Definition, reg.Handler, "manual")
+	}
+	return merged
+}
+
+func buildSubagentsManager(opts Options) (*subagents.Manager, []error) {
+	loader := buildLoaderOptions(opts)
+	projectRegs, errs := subagents.LoadFromFS(subagents.LoaderOptions{
+		ProjectRoot: loader.ProjectRoot,
+		UserHome:    loader.UserHome,
+		EnableUser:  false,
+		FS:          loader.fs,
+	})
+
+	merged := mergeSubagentRegistrations(opts.Subagents, projectRegs, &errs)
+	if len(merged) == 0 {
+		return nil, errs
+	}
+
+	mgr := subagents.NewManager()
+	for _, reg := range merged {
+		if err := mgr.Register(reg.Definition, reg.Handler); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return mgr, errs
+}
+
+func mergeSubagentRegistrations(manual []SubagentRegistration, project []subagents.SubagentRegistration, errs *[]error) []subagents.SubagentRegistration {
+	merged := make([]subagents.SubagentRegistration, 0, len(manual)+len(project))
+	index := map[string]int{}
+
+	add := func(def subagents.Definition, handler subagents.Handler, source string) {
+		key := strings.ToLower(strings.TrimSpace(def.Name))
+		if key == "" {
+			*errs = append(*errs, fmt.Errorf("api: subagent name is empty (%s)", source))
+			return
+		}
+		if handler == nil {
+			*errs = append(*errs, fmt.Errorf("api: subagent %s handler is nil", key))
+			return
+		}
+		entry := subagents.SubagentRegistration{Definition: def, Handler: handler}
+		if idx, ok := index[key]; ok {
+			merged[idx] = entry
+			return
+		}
+		index[key] = len(merged)
+		merged = append(merged, entry)
+	}
+
+	for _, reg := range manual {
+		add(reg.Definition, reg.Handler, "manual")
+	}
+	for _, reg := range project {
+		add(reg.Definition, reg.Handler, "project")
+	}
+	return merged
+}
+
+type historyStore struct {
+	mu             sync.Mutex
+	data           map[string]*message.History
+	lastUsed       map[string]time.Time
+	maxSize        int
+	onEvict        func(string)
+	loader         func(string) ([]message.Message, error)
+	skipNextLoader map[string]struct{} // ForgetSession: next Get must not repopulate from loader
+}
+
+func newHistoryStore(maxSize int) *historyStore {
+	if maxSize <= 0 {
+		maxSize = defaultMaxSessions
+	}
+	return &historyStore{
+		data:     map[string]*message.History{},
+		lastUsed: map[string]time.Time{},
+		maxSize:  maxSize,
+	}
+}
+
+func (s *historyStore) Get(id string) *message.History {
+	if strings.TrimSpace(id) == "" {
+		id = defaultSessionID(defaultEntrypoint)
+	}
+	s.mu.Lock()
+	now := time.Now()
+	if hist, ok := s.data[id]; ok {
+		s.lastUsed[id] = now
+		s.mu.Unlock()
+		return hist
+	}
+	skipLoaderOnce := false
+	if s.skipNextLoader != nil {
+		if _, ok := s.skipNextLoader[id]; ok {
+			skipLoaderOnce = true
+			delete(s.skipNextLoader, id)
+		}
+	}
+	hist := message.NewHistory()
+	s.data[id] = hist
+	s.lastUsed[id] = now
+	onEvict := s.onEvict
+	loader := s.loader
+	evicted := ""
+	if len(s.data) > s.maxSize {
+		evicted = s.evictOldest()
+	}
+	s.mu.Unlock()
+	if !skipLoaderOnce && loader != nil {
+		if loaded, err := loader(id); err == nil && len(loaded) > 0 {
+			hist.Replace(loaded)
+		}
+	}
+	if evicted != "" {
+		cleanupToolOutputSessionDir(evicted) //nolint:errcheck
+		if onEvict != nil {
+			onEvict(evicted)
+		}
+	}
+	return hist
+}
+
+// Remove drops the session history from memory and clears sandbox temp dirs for
+// that session. The next Get for this id skips the optional loader once so a
+// deleted session is not immediately repopulated from persistence.
+func (s *historyStore) Remove(id string) {
+	if s == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	var cb func(string)
+	s.mu.Lock()
+	delete(s.data, id)
+	delete(s.lastUsed, id)
+	if s.skipNextLoader == nil {
+		s.skipNextLoader = map[string]struct{}{}
+	}
+	s.skipNextLoader[id] = struct{}{}
+	cb = s.onEvict
+	s.mu.Unlock()
+
+	_ = cleanupBashOutputSessionDir(id)
+	_ = cleanupToolOutputSessionDir(id)
+	if cb != nil {
+		cb(id)
+	}
+}
+
+// HasHistory reports whether an in-memory history exists for the session.
+func (s *historyStore) HasHistory(id string) bool {
+	if s == nil {
+		return false
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false
+	}
+	s.mu.Lock()
+	_, ok := s.data[id]
+	s.mu.Unlock()
+	return ok
+}
+
+func (s *historyStore) evictOldest() string {
+	if len(s.data) <= s.maxSize {
+		return ""
+	}
+	var oldestKey string
+	var oldestTime time.Time
+	first := true
+	for id, ts := range s.lastUsed {
+		if first || ts.Before(oldestTime) {
+			oldestKey = id
+			oldestTime = ts
+			first = false
+		}
+	}
+	if oldestKey == "" {
+		return ""
+	}
+	delete(s.data, oldestKey)
+	delete(s.lastUsed, oldestKey)
+	return oldestKey
+}
+
+func (s *historyStore) SessionIDs() []string {
+	if s == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ids := make([]string, 0, len(s.data))
+	for id := range s.data {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func bashOutputSessionDir(sessionID string) string {
+	return filepath.Join(bashOutputBaseDir(), sanitizePathComponent(sessionID))
+}
+
+func cleanupBashOutputSessionDir(sessionID string) error {
+	return os.RemoveAll(bashOutputSessionDir(sessionID))
+}
+
+func toolOutputSessionDir(sessionID string) string {
+	return filepath.Join(toolOutputBaseDir(), sanitizePathComponent(sessionID))
+}
+
+func cleanupToolOutputSessionDir(sessionID string) error {
+	return os.RemoveAll(toolOutputSessionDir(sessionID))
+}
+
+func sanitizePathComponent(value string) string {
+	const fallback = "default"
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fallback
+	}
+	var b strings.Builder
+	b.Grow(len(trimmed))
+	for _, r := range trimmed {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9',
+			r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	sanitized := strings.Trim(b.String(), "-")
+	if sanitized == "" {
+		return fallback
+	}
+	return sanitized
+}
+
+func snapshotSandbox(mgr *sandbox.Manager) SandboxReport {
+	if mgr == nil {
+		return SandboxReport{}
+	}
+	return SandboxReport{ResourceLimits: mgr.Limits()}
+}
